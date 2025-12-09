@@ -1,8 +1,15 @@
+import sys
+import os
+
+# Fix import path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-import os
 import shutil
 from pathlib import Path
 
@@ -32,7 +39,7 @@ vector_store = None
 rag_system = None
 quiz_generator = None
 
-UPLOAD_DIR = "data/uploads"
+UPLOAD_DIR = os.path.join(parent_dir, "data", "uploads")
 VECTOR_STORE_NAME = "study_materials"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -85,14 +92,7 @@ def root():
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload and process a document (PDF or TXT)
-    
-    Returns:
-        - filename: Name of uploaded file
-        - chunks_created: Number of text chunks created
-        - message: Success message
-    """
+    """Upload and process a document (PDF or TXT)"""
     global vector_store, rag_system, quiz_generator
     
     try:
@@ -169,17 +169,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 @app.post("/ask")
 def ask_question(request: QuestionRequest):
-    """
-    Ask a question using RAG
-    
-    Args:
-        question: The question to ask
-        k: Number of document chunks to retrieve (default: 5)
-    
-    Returns:
-        - answer: The AI-generated answer
-        - sources: List of source documents with excerpts
-    """
+    """Ask a question using RAG"""
     if rag_system is None:
         raise HTTPException(
             status_code=400, 
@@ -198,18 +188,7 @@ def ask_question(request: QuestionRequest):
 
 @app.post("/summarize")
 def summarize(request: SummarizeRequest):
-    """
-    Summarize content from uploaded documents
-    
-    Args:
-        topic: Optional topic to focus on
-        summary_type: Type of summary (bullets, short, detailed, eli15)
-        k: Number of chunks to retrieve
-    
-    Returns:
-        - summary: The generated summary
-        - sources: List of source documents
-    """
+    """Summarize content from uploaded documents"""
     if rag_system is None:
         raise HTTPException(
             status_code=400, 
@@ -232,16 +211,7 @@ def summarize(request: SummarizeRequest):
 
 @app.post("/definitions")
 def get_definitions(topic: str = "definitions terms concepts"):
-    """
-    Extract key definitions and terms from uploaded materials
-    
-    Args:
-        topic: Topic to search for definitions (default: general search)
-    
-    Returns:
-        - definitions: Extracted definitions
-        - sources: List of source documents
-    """
+    """Extract key definitions and terms from uploaded materials"""
     if rag_system is None:
         raise HTTPException(
             status_code=400, 
@@ -260,18 +230,7 @@ def get_definitions(topic: str = "definitions terms concepts"):
 
 @app.post("/quiz/generate")
 def generate_quiz(request: QuizRequest):
-    """
-    Generate a quiz from uploaded materials
-    
-    Args:
-        topic: Topic for quiz questions
-        num_questions: Number of questions to generate (1-10 recommended)
-        difficulty: easy, medium, or hard
-    
-    Returns:
-        - questions: List of quiz questions with options
-        - metadata: Quiz metadata (topic, difficulty, sources)
-    """
+    """Generate a quiz from uploaded materials"""
     if quiz_generator is None:
         raise HTTPException(
             status_code=400, 
@@ -302,19 +261,7 @@ def generate_quiz(request: QuizRequest):
 
 @app.post("/quiz/grade")
 def grade_quiz(request: GradeQuizRequest):
-    """
-    Grade a quiz submission
-    
-    Args:
-        questions: List of quiz questions
-        user_answers: Dict mapping question index to user's answer (A/B/C/D)
-    
-    Returns:
-        - score: Percentage score
-        - correct: Number of correct answers
-        - total: Total number of questions
-        - results: Detailed results for each question
-    """
+    """Grade a quiz submission"""
     if quiz_generator is None:
         raise HTTPException(
             status_code=400, 
@@ -333,13 +280,7 @@ def grade_quiz(request: GradeQuizRequest):
 
 @app.get("/documents")
 def list_documents():
-    """
-    List all uploaded documents
-    
-    Returns:
-        - documents: List of uploaded filenames
-        - count: Number of documents
-    """
+    """List all uploaded documents"""
     try:
         files = [f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))]
         return {
@@ -352,10 +293,7 @@ def list_documents():
 
 @app.delete("/reset")
 def reset_system():
-    """
-    Reset the system (clear all data)
-    CAUTION: This will delete all uploaded documents and vector stores
-    """
+    """Reset the system (clear all data)"""
     global vector_store, rag_system, quiz_generator
     
     try:
@@ -366,7 +304,7 @@ def reset_system():
                 os.remove(file_path)
         
         # Clear vector store
-        vector_store_path = os.path.join("data/vector_store", VECTOR_STORE_NAME)
+        vector_store_path = os.path.join(parent_dir, "data", "vector_store", VECTOR_STORE_NAME)
         if os.path.exists(vector_store_path):
             shutil.rmtree(vector_store_path)
         
@@ -390,7 +328,7 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("AI STUDY ASSISTANT API")
     print("="*60)
-    print("Powered by: Ollama (100% FREE)")
+    print("Powered by: Ollama")
     print("Starting server on: http://localhost:8000")
     print("API Docs: http://localhost:8000/docs")
     print("="*60 + "\n")
