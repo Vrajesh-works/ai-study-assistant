@@ -131,7 +131,7 @@ def grade_quiz(questions: List[Dict], user_answers: Dict[int, str]):
 def main():
     # Header
     st.markdown('<h1 class="main-header">🎓 AI Study Assistant</h1>', unsafe_allow_html=True)
-    st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Powered by Ollama - 100% FREE & Local</p>', unsafe_allow_html=True)
+    st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">Powered by Ollama</p>', unsafe_allow_html=True)
     
     # Sidebar
     with st.sidebar:
