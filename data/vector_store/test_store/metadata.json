@@ -1,0 +1,7 @@
+{
+  "num_documents": 3,
+  "sources": [
+    "machine_learning_basics.txt"
+  ],
+  "store_name": "test_store"
+}

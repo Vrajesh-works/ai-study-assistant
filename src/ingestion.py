@@ -2,10 +2,10 @@ import os
 from typing import List, Dict
 from pathlib import Path
 import pypdf
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain.docstore.document import Document
 import json
 
 
