@@ -115,7 +115,7 @@ An intelligent study assistant that uses **Retrieval Augmented Generation (RAG)*
 
 1. **Clone the repository**
 ```bash
-   git clone https://github.com/hirvita-kabariya/ai-study-assistant.git
+   git clone https://github.com/Vrajesh-works/ai-study-assistant.git
    cd ai-study-assistant
 ```
 
