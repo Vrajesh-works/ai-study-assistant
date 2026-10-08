@@ -1,10 +1,11 @@
+import os
 import time
 
 import requests
 import streamlit as st
 
-# API Configuration
-API_URL = "http://localhost:8000"
+# API Configuration (override with API_URL env var for hosted deployments)
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 # Page config
 st.set_page_config(

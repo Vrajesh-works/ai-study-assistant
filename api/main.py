@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import urllib.request
+from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
 
@@ -116,6 +117,68 @@ class _State:
 
 
 state = _State()
+
+# Sample documents bundled for the public demo; indexed on startup if the
+# vector store is empty. Set INDEX_SAMPLE_DOCS=0 to disable.
+INDEX_SAMPLE_DOCS = os.getenv("INDEX_SAMPLE_DOCS", "1") == "1"
+
+
+def _load_or_index_vector_store():
+    store_path = os.path.join(
+        parent_dir, config.VECTOR_STORE_DIR, config.VECTOR_STORE_NAME
+    )
+    if os.path.exists(store_path):
+        logger.info("Vector store exists, loading it")
+        try:
+            state.vector_store = state.ensure_ingestion().load_vector_store(
+                config.VECTOR_STORE_NAME
+            )
+        except Exception:
+            logger.exception("Failed to load existing vector store")
+            return
+    elif INDEX_SAMPLE_DOCS:
+        samples = [
+            os.path.join(UPLOAD_DIR, f)
+            for f in sorted(os.listdir(UPLOAD_DIR))
+            if Path(f).suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
+        if not samples:
+            logger.info("No sample documents to index")
+            return
+        logger.info("Indexing %d sample document(s) for the demo", len(samples))
+        try:
+            ingestion = state.ensure_ingestion()
+            all_chunks = []
+            for sample in samples:
+                try:
+                    all_chunks.extend(ingestion.process_documents(sample))
+                except Exception:
+                    logger.exception("Skipping sample document %s", sample)
+            if all_chunks:
+                state.vector_store = ingestion.create_vector_store(
+                    all_chunks, config.VECTOR_STORE_NAME
+                )
+                logger.info("Sample documents indexed (%d chunks)", len(all_chunks))
+        except Exception:
+            logger.exception(
+                "Sample document indexing failed; upload remains available"
+            )
+            return
+    else:
+        return
+
+    if state.vector_store is not None:
+        state.rag_system = RAGSystem(state.vector_store)
+        state.quiz_generator = QuizGenerator(state.vector_store)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _load_or_index_vector_store()
+    yield
+
+
+app.router.lifespan_context = lifespan
 
 
 def _ollama_reachable() -> bool:

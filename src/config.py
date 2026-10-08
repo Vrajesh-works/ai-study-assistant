@@ -18,10 +18,23 @@ def _getenv(name: str, default: str) -> str:
     return value.strip() if isinstance(value, str) else value
 
 
+# LLM provider: "ollama" (local) or "groq" (hosted API)
+LLM_PROVIDER: str = _getenv("LLM_PROVIDER", "ollama").lower()
+
 # Ollama
 OLLAMA_BASE_URL: str = _getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = _getenv("OLLAMA_MODEL", "llama3.2")
 OLLAMA_EMBEDDING_MODEL: str = _getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+
+# Groq (hosted LLM API, free tier at https://console.groq.com)
+GROQ_API_KEY: str = _getenv("GROQ_API_KEY", "")
+GROQ_MODEL: str = _getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+# Embedding provider: "ollama" (local) or "huggingface" (local, no server needed)
+EMBEDDING_PROVIDER: str = _getenv("EMBEDDING_PROVIDER", "ollama").lower()
+HF_EMBEDDING_MODEL: str = _getenv(
+    "HF_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
 
 # API server
 API_HOST: str = _getenv("API_HOST", "0.0.0.0")

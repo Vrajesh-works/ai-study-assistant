@@ -4,10 +4,9 @@ import json
 import logging
 import re
 
-from langchain_community.llms import Ollama
 from langchain_community.vectorstores import Chroma
 
-from src import config
+from src.llm import get_llm
 from src.prompts import QUIZ_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -18,21 +17,11 @@ VALID_DIFFICULTIES = {"easy", "medium", "hard"}
 class QuizGenerator:
     """Generate multiple-choice quizzes from study materials."""
 
-    def __init__(
-        self,
-        vector_store: Chroma,
-        model_name: str = config.OLLAMA_MODEL,
-        base_url: str = config.OLLAMA_BASE_URL,
-    ):
+    def __init__(self, vector_store: Chroma):
         self.vector_store = vector_store
 
-        logger.info("Initializing quiz generator with %s", model_name)
-        self.llm = Ollama(
-            model=model_name,
-            temperature=0.7,
-            base_url=base_url,
-            num_predict=2048,
-        )
+        logger.info("Initializing quiz generator")
+        self.llm = get_llm(temperature=0.7, max_tokens=2048)
         logger.info("Quiz generator ready")
 
     def generate_quiz(

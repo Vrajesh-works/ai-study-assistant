@@ -2,11 +2,11 @@
 
 import logging
 
-from langchain_community.llms import Ollama
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 
 from src import config
+from src.llm import get_llm
 from src.prompts import (
     DEFINITION_EXTRACTION_PROMPT,
     QA_PROMPT_TEMPLATE,
@@ -19,24 +19,13 @@ MAX_CONTEXT_CHARS = 4000
 
 
 class RAGSystem:
-    """RAG-based Q&A system backed by Ollama."""
+    """RAG-based Q&A system (LLM backend configured via src.config)."""
 
-    def __init__(
-        self,
-        vector_store: Chroma,
-        model_name: str = config.OLLAMA_MODEL,
-        temperature: float = 0.3,
-        base_url: str = config.OLLAMA_BASE_URL,
-    ):
+    def __init__(self, vector_store: Chroma, temperature: float = 0.3):
         self.vector_store = vector_store
 
-        logger.info("Initializing RAG with Ollama model: %s", model_name)
-        self.llm = Ollama(
-            model=model_name,
-            temperature=temperature,
-            base_url=base_url,
-            num_predict=512,
-        )
+        logger.info("Initializing RAG system")
+        self.llm = get_llm(temperature=temperature, max_tokens=512)
         self.retriever = vector_store.as_retriever(
             search_type="similarity",
             search_kwargs={"k": config.DEFAULT_RETRIEVAL_K},

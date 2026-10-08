@@ -10,7 +10,8 @@ Turn your study materials into an intelligent learning companion with Retrieval-
 
 ## Why this project
 
-- **Private by design.** Everything runs locally through Ollama. Documents never leave your machine, no API keys, no per-token costs.
+- **Private by default.** Runs 100% locally through Ollama. Documents never leave your machine, no API keys, no per-token costs.
+- **Hostable too.** Swap in Groq's free API tier for the LLM and HuggingFace embeddings for a public demo with zero local dependencies.
 - **Grounded answers.** Every answer cites the source document and page it came from, so you can verify instead of trust.
 - **Full learning loop.** Q&A, multi-format summaries, auto-generated quizzes with grading, and definition extraction in one place.
 - **Real API.** A documented FastAPI backend (Swagger at `/docs`) powers both the Streamlit UI and any client you build.
@@ -89,10 +90,29 @@ All settings live in `.env` (see `.env.example`) and are loaded at startup:
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `LLM_PROVIDER` | `ollama` | `ollama` (local) or `groq` (hosted API) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server address |
-| `OLLAMA_MODEL` | `llama3.2` | Chat model (`llama3.1`, `mistral`, `phi` also work) |
-| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model |
+| `OLLAMA_MODEL` | `llama3.2` | Ollama chat model |
+| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
+| `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `huggingface` (no server needed) |
+| `HF_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace embedding model |
+| `GROQ_API_KEY` | (empty) | Required when `LLM_PROVIDER=groq`; free at console.groq.com |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | API bind address |
+| `API_URL` | `http://localhost:8000` | API address for the Streamlit frontend |
+| `INDEX_SAMPLE_DOCS` | `1` | Index bundled sample docs on startup if store is empty |
+
+### Hosted demo mode
+
+Set these to run without any local Ollama installation:
+
+```env
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_free_key_from_console.groq.com
+EMBEDDING_PROVIDER=huggingface
+```
+
+The API indexes the bundled sample documents on first startup, so the demo works immediately.
 
 ## API Reference
 

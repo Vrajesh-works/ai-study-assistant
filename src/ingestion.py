@@ -6,12 +6,12 @@ import os
 from pathlib import Path
 
 import pypdf
-from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src import config
+from src.embeddings import get_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -19,18 +19,13 @@ SUPPORTED_EXTENSIONS = {".pdf", ".txt"}
 
 
 class DocumentIngestion:
-    """Handles document upload, processing, and indexing with Ollama embeddings."""
+    """Handles document upload, processing, and indexing."""
 
-    def __init__(
-        self,
-        vector_store_path: str = config.VECTOR_STORE_DIR,
-        embedding_model: str = config.OLLAMA_EMBEDDING_MODEL,
-        base_url: str = config.OLLAMA_BASE_URL,
-    ):
+    def __init__(self, vector_store_path: str = config.VECTOR_STORE_DIR):
         self.vector_store_path = vector_store_path
 
-        logger.info("Initializing Ollama embeddings (model=%s)", embedding_model)
-        self.embeddings = OllamaEmbeddings(model=embedding_model, base_url=base_url)
+        logger.info("Initializing embeddings")
+        self.embeddings = get_embeddings()
 
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHUNK_SIZE,
