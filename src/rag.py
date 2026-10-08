@@ -1,164 +1,131 @@
-from typing import List, Dict, Optional
+"""RAG pipeline: retrieval-augmented Q&A, summarization, and definition extraction."""
+
+import logging
+
 from langchain_community.llms import Ollama
 from langchain_community.vectorstores import Chroma
+from langchain_core.documents import Document
+
+from src import config
 from src.prompts import (
-    QA_PROMPT_TEMPLATE, 
-    SUMMARIZATION_PROMPT_TEMPLATE, 
-    DEFINITION_EXTRACTION_PROMPT
+    DEFINITION_EXTRACTION_PROMPT,
+    QA_PROMPT_TEMPLATE,
+    SUMMARIZATION_PROMPT_TEMPLATE,
 )
+
+logger = logging.getLogger(__name__)
+
+MAX_CONTEXT_CHARS = 4000
 
 
 class RAGSystem:
-    """RAG-based Q&A system using Ollama"""
-    
-    def __init__(self, vector_store: Chroma, model_name: str = "llama3.2", temperature: float = 0.3):
+    """RAG-based Q&A system backed by Ollama."""
+
+    def __init__(
+        self,
+        vector_store: Chroma,
+        model_name: str = config.OLLAMA_MODEL,
+        temperature: float = 0.3,
+        base_url: str = config.OLLAMA_BASE_URL,
+    ):
         self.vector_store = vector_store
-        
-        print(f"Initializing RAG with Ollama model: {model_name}")
-        
-        # Initialize Ollama LLM
+
+        logger.info("Initializing RAG with Ollama model: %s", model_name)
         self.llm = Ollama(
             model=model_name,
             temperature=temperature,
-            base_url="http://localhost:11434",
-            num_predict=512,  # Max tokens to generate
+            base_url=base_url,
+            num_predict=512,
         )
-        
-        # Setup retriever
         self.retriever = vector_store.as_retriever(
             search_type="similarity",
-            search_kwargs={"k": 5}
+            search_kwargs={"k": config.DEFAULT_RETRIEVAL_K},
         )
-        
-        print("✓ RAG System ready")
-    
-    def ask_question(self, question: str, k: int = 5) -> Dict:
-        """Answer a question using RAG"""
-        print(f"\n{'='*50}")
-        print(f"Question: {question}")
-        print(f"{'='*50}")
-        
-        # Retrieve relevant documents
-        print("Searching for relevant content...")
+        logger.info("RAG system ready")
+
+    def _format_sources(self, docs: list[Document]) -> list[dict]:
+        return [
+            {
+                "source": doc.metadata.get("source", "unknown"),
+                "page": doc.metadata.get("page", "N/A"),
+                "excerpt": doc.page_content[:200] + "...",
+            }
+            for doc in docs
+        ]
+
+    def ask_question(self, question: str, k: int = 5) -> dict:
+        """Answer a question using retrieval-augmented generation."""
+        logger.info("Q&A request: %s", question)
         relevant_docs = self.vector_store.similarity_search(question, k=k)
-        
+
         if not relevant_docs:
             return {
                 "answer": "I couldn't find relevant information in your study materials.",
-                "sources": []
+                "sources": [],
             }
-        
-        print(f"✓ Found {len(relevant_docs)} relevant chunks")
-        
-        # Prepare context
-        context = "\n\n".join([
-            f"[Source: {doc.metadata.get('source', 'unknown')}, Page: {doc.metadata.get('page', 'N/A')}]\n{doc.page_content}"
+        logger.info("Found %d relevant chunks", len(relevant_docs))
+
+        context = "\n\n".join(
+            f"[Source: {doc.metadata.get('source', 'unknown')}, "
+            f"Page: {doc.metadata.get('page', 'N/A')}]\n{doc.page_content}"
             for doc in relevant_docs
-        ])
-        
-        # Create prompt
+        )
         prompt = QA_PROMPT_TEMPLATE.format(context=context, question=question)
-        
-        # Get answer from Ollama
-        print("Generating answer...")
         answer = self.llm.invoke(prompt)
-        
-        print("✓ Answer generated")
-        
-        # Prepare sources
-        sources = [
-            {
-                "source": doc.metadata.get('source', 'unknown'),
-                "page": doc.metadata.get('page', 'N/A'),
-                "excerpt": doc.page_content[:200] + "..."
-            }
-            for doc in relevant_docs
-        ]
-        
-        return {
-            "answer": answer,
-            "sources": sources
-        }
-    
-    def summarize(self, query: str = None, summary_type: str = "bullets", k: int = 10) -> Dict:
-        """Summarize content from the knowledge base"""
-        print(f"\n{'='*50}")
-        print(f"Summarization Request: {summary_type}")
-        print(f"{'='*50}")
-        
+        logger.info("Answer generated")
+
+        return {"answer": answer, "sources": self._format_sources(relevant_docs)}
+
+    def summarize(
+        self, query: str | None = None, summary_type: str = "bullets", k: int = 10
+    ) -> dict:
+        """Summarize content from the knowledge base."""
+        logger.info("Summarization request: type=%s topic=%s", summary_type, query)
         if query:
-            print(f"Topic: {query}")
             relevant_docs = self.vector_store.similarity_search(query, k=k)
         else:
-            print("Generating general summary")
-            # Get diverse chunks for general summary
-            relevant_docs = self.vector_store.similarity_search("overview main concepts key topics", k=k)
-        
+            relevant_docs = self.vector_store.similarity_search(
+                "overview main concepts key topics", k=k
+            )
+
         if not relevant_docs:
-            return {
-                "summary": "No content found to summarize.",
-                "sources": []
-            }
-        
-        print(f"✓ Found {len(relevant_docs)} relevant chunks")
-        
-        # Prepare context
-        context = "\n\n".join([doc.page_content for doc in relevant_docs])
-        
-        # Create prompt
+            return {"summary": "No content found to summarize.", "sources": []}
+        logger.info("Found %d relevant chunks", len(relevant_docs))
+
+        context = "\n\n".join(doc.page_content for doc in relevant_docs)
         prompt = SUMMARIZATION_PROMPT_TEMPLATE.format(
-            context=context[:4000],  # Limit context size
-            summary_type=summary_type
+            context=context[:MAX_CONTEXT_CHARS], summary_type=summary_type
         )
-        
-        # Generate summary
-        print("Generating summary...")
         summary = self.llm.invoke(prompt)
-        
-        print("✓ Summary generated")
-        
-        # Prepare sources
-        sources = list(set([doc.metadata.get('source', 'unknown') for doc in relevant_docs]))
-        
-        return {
-            "summary": summary,
-            "sources": sources
-        }
-    
-    def extract_definitions(self, query: str = "definitions terms concepts", k: int = 10) -> Dict:
-        """Extract key definitions from content"""
-        print(f"\n{'='*50}")
-        print("Extracting Definitions")
-        print(f"{'='*50}")
-        
+        logger.info("Summary generated")
+
+        sources = list({doc.metadata.get("source", "unknown") for doc in relevant_docs})
+        return {"summary": summary, "sources": sources}
+
+    def extract_definitions(
+        self, query: str = "definitions terms concepts", k: int = 10
+    ) -> dict:
+        """Extract key definitions from the knowledge base."""
+        logger.info("Definition extraction request")
         relevant_docs = self.vector_store.similarity_search(query, k=k)
-        
+
         if not relevant_docs:
-            return {
-                "definitions": "No definitions found.",
-                "sources": []
-            }
-        
-        print(f"✓ Found {len(relevant_docs)} relevant chunks")
-        
-        context = "\n\n".join([doc.page_content for doc in relevant_docs])
-        prompt = DEFINITION_EXTRACTION_PROMPT.format(context=context[:4000])
-        
-        print("Extracting definitions...")
+            return {"definitions": "No definitions found.", "sources": []}
+        logger.info("Found %d relevant chunks", len(relevant_docs))
+
+        context = "\n\n".join(doc.page_content for doc in relevant_docs)
+        prompt = DEFINITION_EXTRACTION_PROMPT.format(
+            context=context[:MAX_CONTEXT_CHARS]
+        )
         definitions = self.llm.invoke(prompt)
-        
-        print("✓ Definitions extracted")
-        
-        sources = list(set([doc.metadata.get('source', 'unknown') for doc in relevant_docs]))
-        
-        return {
-            "definitions": definitions,
-            "sources": sources
-        }
+        logger.info("Definitions extracted")
+
+        sources = list({doc.metadata.get("source", "unknown") for doc in relevant_docs})
+        return {"definitions": definitions, "sources": sources}
 
 
-# Test the module
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     print("RAG System Module - Ready!")
     print("\nTo test:")
     print("1. First create a vector store using ingestion.py")

@@ -1,8 +1,7 @@
-import streamlit as st
-import requests
-import json
-from typing import Dict, List
 import time
+
+import requests
+import streamlit as st
 
 # API Configuration
 API_URL = "http://localhost:8000"
@@ -65,7 +64,7 @@ def check_api_status():
     try:
         response = requests.get(f"{API_URL}/", timeout=2)
         return response.json()
-    except:
+    except requests.RequestException:
         return None
 
 
@@ -85,7 +84,7 @@ def ask_question(question: str, k: int = 5):
     return response.json()
 
 
-def get_summary(topic: str = None, summary_type: str = "bullets", k: int = 10):
+def get_summary(topic: str | None = None, summary_type: str = "bullets", k: int = 10):
     """Get summary"""
     response = requests.post(
         f"{API_URL}/summarize",
@@ -98,7 +97,7 @@ def get_definitions(topic: str = "definitions"):
     """Get definitions"""
     response = requests.post(
         f"{API_URL}/definitions",
-        params={"topic": topic}
+        json={"topic": topic}
     )
     return response.json()
 
@@ -116,7 +115,7 @@ def generate_quiz(topic: str, num_questions: int, difficulty: str):
     return response.json()
 
 
-def grade_quiz(questions: List[Dict], user_answers: Dict[int, str]):
+def grade_quiz(questions: list[dict], user_answers: dict[int, str]):
     """Grade quiz"""
     response = requests.post(
         f"{API_URL}/quiz/grade",
@@ -143,7 +142,7 @@ def main():
         if api_status:
             if api_status.get('documents_loaded'):
                 st.success("✅ System Ready")
-                st.info(f"🤖 Using Ollama (Local)")
+                st.info("🤖 Using Ollama (Local)")
             else:
                 st.warning("⚠️ No documents loaded")
         else:
@@ -162,17 +161,16 @@ def main():
             help="Upload PDFs or text files containing your study materials"
         )
         
-        if uploaded_file:
-            if st.button("📤 Process Document", use_container_width=True):
-                with st.spinner("Processing document... This may take a minute..."):
-                    try:
-                        result = upload_document(uploaded_file)
-                        st.success(f"✅ {result['message']}")
-                        st.info(f"📊 Created {result['chunks_created']} chunks")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+        if uploaded_file and st.button("📤 Process Document", use_container_width=True):
+            with st.spinner("Processing document... This may take a minute..."):
+                try:
+                    result = upload_document(uploaded_file)
+                    st.success(f"✅ {result['message']}")
+                    st.info(f"📊 Created {result['chunks_created']} chunks")
+                    time.sleep(1)
+                    st.rerun()
+                except requests.RequestException as e:
+                    st.error(f"❌ Error: {e!s}")
         
         st.divider()
         
@@ -185,21 +183,32 @@ def main():
                 st.subheader(f"📚 Uploaded Files ({docs_data['count']})")
                 for doc in docs_data['documents']:
                     st.text(f"• {doc}")
-        except:
-            pass
+        except requests.RequestException:
+            pass  # sidebar stays usable if the documents call fails
         
         st.divider()
         
-        # Reset button
+        # Reset button (two-step confirmation via session state)
         if st.button("🔄 Reset System", use_container_width=True, type="secondary"):
-            if st.confirm("⚠️ This will delete all data. Continue?"):
-                try:
-                    requests.delete(f"{API_URL}/reset")
-                    st.success("System reset!")
+            st.session_state["confirm_reset"] = True
+
+        if st.session_state.get("confirm_reset"):
+            st.warning("⚠️ This deletes all uploaded documents and the vector store.")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("Yes, reset", use_container_width=True):
+                    try:
+                        requests.delete(f"{API_URL}/reset")
+                        st.success("System reset!")
+                    except requests.RequestException:
+                        st.error("Reset failed")
+                    st.session_state["confirm_reset"] = False
                     time.sleep(1)
                     st.rerun()
-                except:
-                    st.error("Reset failed")
+            with col_b:
+                if st.button("Cancel", use_container_width=True):
+                    st.session_state["confirm_reset"] = False
+                    st.rerun()
     
     # Main content tabs
     tab1, tab2, tab3, tab4 = st.tabs(["💬 Ask Questions", "📝 Summarize", "🎯 Quiz Me", "📚 Definitions"])
@@ -236,8 +245,8 @@ def main():
                                     st.text(source['excerpt'])
                                     if i < len(result['sources']):
                                         st.divider()
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+                    except requests.RequestException as e:
+                        st.error(f"❌ Error: {e!s}")
             else:
                 st.warning("⚠️ Please enter a question")
         
@@ -273,8 +282,8 @@ def main():
         with col2:
             summary_type = st.selectbox(
                 "Summary type:",
-                ["bullets", "short", "detailed", "eli15"],
-                help="bullets: 5-7 bullet points\nshort: 2-3 sentences\ndetailed: comprehensive\neli15: simple explanation"
+                ["bullets", "short", "detailed", "eli5"],
+                help="bullets: 5-7 bullet points\nshort: 2-3 sentences\ndetailed: comprehensive\neli5: simple explanation"
             )
         
         if st.button("📝 Generate Summary", use_container_width=True, type="primary"):
@@ -287,8 +296,8 @@ def main():
                     
                     if result['sources']:
                         st.info(f"📚 Based on: {', '.join(result['sources'])}")
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
+                except requests.RequestException as e:
+                    st.error(f"❌ Error: {e!s}")
     
     # Tab 3: Quiz
     with tab3:
@@ -325,14 +334,14 @@ def main():
                     try:
                         quiz_data = generate_quiz(quiz_topic, num_questions, difficulty)
                         
-                        if 'questions' in quiz_data and quiz_data['questions']:
+                        if quiz_data.get('questions'):
                             st.session_state['current_quiz'] = quiz_data
                             st.success(f"✅ Generated {len(quiz_data['questions'])} questions!")
                             st.rerun()
                         else:
                             st.error(f"❌ Quiz generation failed: {quiz_data.get('error', 'Unknown error')}")
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+                    except requests.RequestException as e:
+                        st.error(f"❌ Error: {e!s}")
             else:
                 st.warning("⚠️ Please enter a quiz topic")
         
@@ -361,12 +370,11 @@ def main():
                 st.markdown(f"**Question {i+1} of {len(quiz_data['questions'])}**")
                 st.markdown(f"### {q['question']}")
                 
-                options_list = [f"{key}: {value}" for key, value in q['options'].items()]
                 
                 answer = st.radio(
                     "Select your answer:",
                     options=list(q['options'].keys()),
-                    format_func=lambda x: f"{x}. {q['options'][x]}",
+                    format_func=lambda x, opts=q["options"]: f"{x}. {opts[x]}",
                     key=f"q_{i}",
                     label_visibility="collapsed"
                 )
@@ -413,8 +421,8 @@ def main():
                             del st.session_state['current_quiz']
                             st.rerun()
                             
-                    except Exception as e:
-                        st.error(f"❌ Grading failed: {str(e)}")
+                    except requests.RequestException as e:
+                        st.error(f"❌ Grading failed: {e!s}")
     
     # Tab 4: Definitions
     with tab4:
@@ -436,8 +444,8 @@ def main():
                     
                     if result['sources']:
                         st.info(f"📚 Extracted from: {', '.join(result['sources'])}")
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
+                except requests.RequestException as e:
+                    st.error(f"❌ Error: {e!s}")
     
     # Footer
     st.divider()

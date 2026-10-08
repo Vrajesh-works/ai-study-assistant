@@ -1,217 +1,189 @@
+"""Document ingestion: extract text from PDF/TXT, chunk it, and index it in Chroma."""
+
+import json
+import logging
 import os
-from typing import List, Dict
 from pathlib import Path
+
 import pypdf
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
-import json
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from src import config
+
+logger = logging.getLogger(__name__)
+
+SUPPORTED_EXTENSIONS = {".pdf", ".txt"}
 
 
 class DocumentIngestion:
-    """Handles document upload, processing, and indexing with Ollama"""
-    
-    def __init__(self, vector_store_path: str = "data/vector_store"):
+    """Handles document upload, processing, and indexing with Ollama embeddings."""
+
+    def __init__(
+        self,
+        vector_store_path: str = config.VECTOR_STORE_DIR,
+        embedding_model: str = config.OLLAMA_EMBEDDING_MODEL,
+        base_url: str = config.OLLAMA_BASE_URL,
+    ):
         self.vector_store_path = vector_store_path
-        
-        # Initialize Ollama embeddings
-        print("Initializing Ollama embeddings...")
-        self.embeddings = OllamaEmbeddings(
-            model="nomic-embed-text",
-            base_url="http://localhost:11434"
-        )
-        
-        # Text splitter configuration
+
+        logger.info("Initializing Ollama embeddings (model=%s)", embedding_model)
+        self.embeddings = OllamaEmbeddings(model=embedding_model, base_url=base_url)
+
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
+            chunk_size=config.CHUNK_SIZE,
+            chunk_overlap=config.CHUNK_OVERLAP,
             length_function=len,
-            separators=["\n\n", "\n", ".", " ", ""]
+            separators=["\n\n", "\n", ".", " ", ""],
         )
-    
-    def extract_text_from_pdf(self, pdf_path: str) -> List[Dict]:
-        """Extract text from PDF with page numbers"""
+
+    def extract_text_from_pdf(self, pdf_path: str) -> list[dict]:
+        """Extract text from a PDF, keeping page numbers in metadata."""
         documents = []
-        
         try:
-            print(f"Extracting text from {pdf_path}...")
-            with open(pdf_path, 'rb') as file:
+            logger.info("Extracting text from %s", pdf_path)
+            with open(pdf_path, "rb") as file:
                 pdf_reader = pypdf.PdfReader(file)
                 filename = Path(pdf_path).name
-                total_pages = len(pdf_reader.pages)
-                
+
                 for page_num, page in enumerate(pdf_reader.pages, start=1):
-                    print(f"  Processing page {page_num}/{total_pages}...", end='\r')
-                    text = page.extract_text()
-                    
+                    text = page.extract_text() or ""
                     if text.strip():
-                        documents.append({
-                            'content': text,
-                            'metadata': {
-                                'source': filename,
-                                'page': page_num,
-                                'type': 'pdf'
+                        documents.append(
+                            {
+                                "content": text,
+                                "metadata": {
+                                    "source": filename,
+                                    "page": page_num,
+                                    "type": "pdf",
+                                },
                             }
-                        })
-                
-                print(f"\n✓ Extracted {len(documents)} pages from {filename}")
-                        
-        except Exception as e:
-            print(f"✗ Error extracting PDF {pdf_path}: {str(e)}")
-            
+                        )
+            logger.info("Extracted %d pages from %s", len(documents), filename)
+        except Exception:
+            logger.exception("Error extracting PDF %s", pdf_path)
         return documents
-    
-    def extract_text_from_txt(self, txt_path: str) -> List[Dict]:
-        """Extract text from plain text file"""
+
+    def extract_text_from_txt(self, txt_path: str) -> list[dict]:
+        """Extract text from a plain text file."""
         try:
-            print(f"Reading text file {txt_path}...")
-            with open(txt_path, 'r', encoding='utf-8') as file:
+            logger.info("Reading text file %s", txt_path)
+            with open(txt_path, "r", encoding="utf-8") as file:
                 text = file.read()
-                filename = Path(txt_path).name
-                
-                print(f"✓ Read {len(text)} characters from {filename}")
-                return [{
-                    'content': text,
-                    'metadata': {
-                        'source': filename,
-                        'type': 'txt'
-                    }
-                }]
-        except Exception as e:
-            print(f"✗ Error reading text file {txt_path}: {str(e)}")
+            filename = Path(txt_path).name
+            logger.info("Read %d characters from %s", len(text), filename)
+            return [{"content": text, "metadata": {"source": filename, "type": "txt"}}]
+        except Exception:
+            logger.exception("Error reading text file %s", txt_path)
             return []
-    
-    def clean_text(self, text: str) -> str:
-        """Clean extracted text"""
-        # Remove excessive whitespace
-        text = ' '.join(text.split())
-        # Remove null characters
-        text = text.replace('\x00', '')
-        # Remove very short lines that are likely artifacts
+
+    @staticmethod
+    def clean_text(text: str) -> str:
+        """Normalize whitespace and strip control characters."""
+        text = " ".join(text.split())
+        text = text.replace("\x00", "")
         return text.strip()
-    
-    def process_documents(self, file_path: str) -> List[Document]:
-        """Process a document into chunks"""
-        print(f"\n{'='*50}")
-        print(f"Processing: {file_path}")
-        print(f"{'='*50}")
-        
+
+    def process_documents(self, file_path: str) -> list[Document]:
+        """Process a document file into LangChain document chunks."""
+        logger.info("Processing: %s", file_path)
         file_extension = Path(file_path).suffix.lower()
-        
-        # Extract text based on file type
-        if file_extension == '.pdf':
+
+        if file_extension == ".pdf":
             raw_docs = self.extract_text_from_pdf(file_path)
-        elif file_extension == '.txt':
+        elif file_extension == ".txt":
             raw_docs = self.extract_text_from_txt(file_path)
         else:
             raise ValueError(f"Unsupported file type: {file_extension}")
-        
+
         if not raw_docs:
             raise ValueError("No content extracted from document")
-        
-        # Clean and create LangChain documents
-        print("Cleaning text...")
+
         documents = []
         for doc in raw_docs:
-            cleaned_text = self.clean_text(doc['content'])
-            if cleaned_text and len(cleaned_text) > 50:  # Skip very short chunks
-                documents.append(Document(
-                    page_content=cleaned_text,
-                    metadata=doc['metadata']
-                ))
-        
-        print(f"✓ Created {len(documents)} clean documents")
-        
-        # Split into chunks
-        print("Splitting into chunks...")
+            cleaned_text = self.clean_text(doc["content"])
+            if cleaned_text and len(cleaned_text) > 50:
+                documents.append(
+                    Document(page_content=cleaned_text, metadata=doc["metadata"])
+                )
+        logger.info("Created %d clean documents", len(documents))
+
         chunks = self.text_splitter.split_documents(documents)
-        
-        print(f"✓ Created {len(chunks)} chunks")
-        print(f"{'='*50}\n")
-        
+        logger.info("Created %d chunks", len(chunks))
         return chunks
-    
-    def create_vector_store(self, documents: List[Document], store_name: str = "default"):
-        """Create Chroma vector store from documents"""
+
+    def create_vector_store(self, documents: list[Document], store_name: str = "default"):
+        """Create a Chroma vector store from documents."""
         if not documents:
             raise ValueError("No documents to index")
-        
-        print(f"\n{'='*50}")
-        print(f"Creating Vector Store: {store_name}")
-        print(f"{'='*50}")
-        
+
         store_path = os.path.join(self.vector_store_path, store_name)
         os.makedirs(store_path, exist_ok=True)
-        
-        print(f"Generating embeddings for {len(documents)} chunks...")
-        print("This may take a few minutes...")
-        
-        # Create vector store with Ollama embeddings
+
+        logger.info(
+            "Creating vector store '%s' with %d chunks (this may take a few minutes)",
+            store_name,
+            len(documents),
+        )
         vector_store = Chroma.from_documents(
             documents=documents,
             embedding=self.embeddings,
             persist_directory=store_path,
-            collection_name=store_name
+            collection_name=store_name,
         )
-        
-        # Save metadata
+
         metadata = {
-            'num_documents': len(documents),
-            'sources': list(set([doc.metadata.get('source', 'unknown') for doc in documents])),
-            'store_name': store_name
+            "num_documents": len(documents),
+            "sources": list(
+                {doc.metadata.get("source", "unknown") for doc in documents}
+            ),
+            "store_name": store_name,
         }
-        
-        with open(os.path.join(store_path, 'metadata.json'), 'w') as f:
+        with open(os.path.join(store_path, "metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
-        
-        print(f"✓ Vector store created at: {store_path}")
-        print(f"✓ Indexed {len(documents)} document chunks")
-        print(f"{'='*50}\n")
-        
+
+        logger.info("Vector store created at %s (%d chunks)", store_path, len(documents))
         return vector_store
-    
+
     def load_vector_store(self, store_name: str = "default"):
-        """Load existing vector store"""
+        """Load an existing Chroma vector store."""
         store_path = os.path.join(self.vector_store_path, store_name)
-        
         if not os.path.exists(store_path):
             raise FileNotFoundError(f"Vector store not found at {store_path}")
-        
-        print(f"Loading vector store from {store_path}...")
-        
+
+        logger.info("Loading vector store from %s", store_path)
         vector_store = Chroma(
             persist_directory=store_path,
             embedding_function=self.embeddings,
-            collection_name=store_name
+            collection_name=store_name,
         )
-        
-        print(f"✓ Vector store loaded")
+        logger.info("Vector store loaded")
         return vector_store
-    
-    def add_documents_to_existing_store(self, documents: List[Document], store_name: str = "default"):
-        """Add new documents to existing vector store"""
+
+    def add_documents_to_existing_store(
+        self, documents: list[Document], store_name: str = "default"
+    ):
+        """Append documents to an existing store, creating it if needed."""
         try:
-            print("Loading existing vector store...")
             vector_store = self.load_vector_store(store_name)
-            
-            print(f"Adding {len(documents)} new documents...")
+            logger.info("Adding %d documents to '%s'", len(documents), store_name)
             vector_store.add_documents(documents)
-            
-            print("✓ Documents added successfully")
+            logger.info("Documents added successfully")
         except FileNotFoundError:
-            print("No existing store found. Creating new one...")
+            logger.info("No existing store found, creating '%s'", store_name)
             vector_store = self.create_vector_store(documents, store_name)
-        
         return vector_store
 
 
-# Test the module
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     print("Document Ingestion Module - Ready!")
     print("\nTo test:")
     print("1. Place a PDF or TXT file in data/uploads/")
-    print("2. Run this test:")
-    print("\n  ingestion = DocumentIngestion()")
+    print("2. Run:")
+    print("\n  from src.ingestion import DocumentIngestion")
+    print("  ingestion = DocumentIngestion()")
     print("  chunks = ingestion.process_documents('data/uploads/your_file.pdf')")
     print("  vector_store = ingestion.create_vector_store(chunks, 'test_store')")

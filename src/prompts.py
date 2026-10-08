@@ -24,7 +24,7 @@ Create a {summary_type} summary:
 - short: 2-3 sentences
 - bullets: 5-7 bullet points
 - detailed: comprehensive paragraph
-- eli15: explain like I'm 15 years old
+- eli5: explain like I'm 5 years old
 
 Summary:"""
 

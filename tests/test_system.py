@@ -1,10 +1,11 @@
-import sys
 import os
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.ingestion import DocumentIngestion
-from src.rag import RAGSystem
 from src.quiz_generator import QuizGenerator
+from src.rag import RAGSystem
 
 
 def create_test_document():
@@ -152,7 +153,7 @@ def test_complete_pipeline():
         difficulty="medium"
     )
     
-    if "questions" in quiz and quiz["questions"]:
+    if quiz.get("questions"):
         print(f"\n✓ Generated {len(quiz['questions'])} questions:")
         for i, q in enumerate(quiz['questions'], 1):
             print(f"\n{i}. {q['question']}")
@@ -163,7 +164,7 @@ def test_complete_pipeline():
         print(f"✗ Quiz generation failed: {quiz.get('error', 'Unknown error')}")
     
     # Step 9: Test Quiz Grading
-    if "questions" in quiz and quiz["questions"]:
+    if quiz.get("questions"):
         print("\n[STEP 9] Testing Quiz Grading...")
         # Simulate user answers (all correct)
         user_answers = {i: q['correct_answer'] for i, q in enumerate(quiz['questions'])}
@@ -179,8 +180,8 @@ def test_complete_pipeline():
 if __name__ == "__main__":
     try:
         test_complete_pipeline()
-    except Exception as e:
-        print(f"\n✗ TEST FAILED WITH ERROR:")
-        print(f"  {str(e)}")
+    except Exception as e:  # noqa: BLE001 - e2e script reports any failure
+        print("\n✗ TEST FAILED WITH ERROR:")
+        print(f"  {e!s}")
         import traceback
         traceback.print_exc()

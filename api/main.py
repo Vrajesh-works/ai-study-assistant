@@ -1,30 +1,49 @@
-import sys
-import os
+"""FastAPI backend for the AI Study Assistant.
 
-# Fix import path
+Run from the project root:
+    python api/main.py
+"""
+
+import logging
+import os
+import shutil
+import sys
+import urllib.request
+from enum import Enum
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+# Fix import path so `src` resolves when running api/main.py directly
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict
-import shutil
-from pathlib import Path
-
-from src.ingestion import DocumentIngestion
-from src.rag import RAGSystem
+from src import config
+from src.ingestion import SUPPORTED_EXTENSIONS, DocumentIngestion
 from src.quiz_generator import QuizGenerator
+from src.rag import RAGSystem
 
-# Initialize FastAPI
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+UPLOAD_DIR = os.path.join(parent_dir, config.UPLOAD_DIR)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 app = FastAPI(
     title="AI Study Assistant API",
-    description="RAG-powered study assistant using Ollama (100% FREE)",
-    version="1.0.0"
+    description=(
+        "RAG-powered study assistant. Upload study materials, ask questions, "
+        "generate summaries and quizzes. Runs on local LLMs via Ollama."
+    ),
+    version="1.1.0",
 )
 
-# CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,304 +52,302 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global instances
-ingestion = DocumentIngestion()
-vector_store = None
-rag_system = None
-quiz_generator = None
 
-UPLOAD_DIR = os.path.join(parent_dir, "data", "uploads")
-VECTOR_STORE_NAME = "study_materials"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+class Difficulty(str, Enum):
+    easy = "easy"
+    medium = "medium"
+    hard = "hard"
 
 
-# Pydantic models for request validation
+class SummaryType(str, Enum):
+    bullets = "bullets"
+    short = "short"
+    detailed = "detailed"
+    eli5 = "eli5"
+
+
 class QuestionRequest(BaseModel):
-    question: str
-    k: int = 5
+    question: str = Field(min_length=1)
+    k: int = Field(default=5, ge=1, le=20)
 
 
 class SummarizeRequest(BaseModel):
-    topic: Optional[str] = None
-    summary_type: str = "bullets"
-    k: int = 10
+    topic: str | None = None
+    summary_type: SummaryType = SummaryType.bullets
+    k: int = Field(default=10, ge=1, le=20)
+
+
+class DefinitionsRequest(BaseModel):
+    topic: str = "definitions terms concepts"
+    k: int = Field(default=10, ge=1, le=20)
 
 
 class QuizRequest(BaseModel):
-    topic: str
-    num_questions: int = 10
-    difficulty: str = "medium"
+    topic: str = Field(min_length=1)
+    num_questions: int = Field(default=5, ge=1, le=10)
+    difficulty: Difficulty = Difficulty.medium
 
 
 class GradeQuizRequest(BaseModel):
-    questions: List[Dict]
-    user_answers: Dict[int, str]
+    questions: list[dict]
+    user_answers: dict[str, str]
 
 
-# API Endpoints
+class _State:
+    """Lazily-initialized pipeline components (built on first upload)."""
 
-@app.get("/")
+    def __init__(self):
+        self.ingestion: DocumentIngestion | None = None
+        self.vector_store = None
+        self.rag_system: RAGSystem | None = None
+        self.quiz_generator: QuizGenerator | None = None
+
+    def ensure_ingestion(self) -> DocumentIngestion:
+        if self.ingestion is None:
+            self.ingestion = DocumentIngestion()
+        return self.ingestion
+
+    def require_ready(self):
+        if self.rag_system is None or self.quiz_generator is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No documents uploaded yet. Please upload documents first.",
+            )
+
+
+state = _State()
+
+
+def _ollama_reachable() -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"{config.OLLAMA_BASE_URL}/api/tags", timeout=3
+        ) as response:
+            return response.status == 200
+    except Exception:  # noqa: BLE001 - any failure means unreachable
+        return False
+
+
+@app.get("/", tags=["status"])
 def root():
-    """Health check and status endpoint"""
+    """Service status and endpoint index."""
     return {
-        "message": "AI Study Assistant API - Powered by Ollama",
+        "message": "AI Study Assistant API",
         "status": "running",
-        "documents_loaded": vector_store is not None,
-        "ollama_url": "http://localhost:11434",
+        "documents_loaded": state.vector_store is not None,
+        "ollama": {
+            "base_url": config.OLLAMA_BASE_URL,
+            "model": config.OLLAMA_MODEL,
+            "reachable": _ollama_reachable(),
+        },
         "endpoints": {
+            "health": "/health",
             "upload": "/upload",
             "ask": "/ask",
             "summarize": "/summarize",
             "definitions": "/definitions",
             "quiz_generate": "/quiz/generate",
             "quiz_grade": "/quiz/grade",
-            "documents": "/documents"
-        }
+            "documents": "/documents",
+        },
     }
 
 
-@app.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """Upload and process a document (PDF or TXT)"""
-    global vector_store, rag_system, quiz_generator
-    
+@app.get("/health", tags=["status"])
+def health():
+    """Health check, including Ollama connectivity."""
+    ollama_ok = _ollama_reachable()
+    return {
+        "status": "ok" if ollama_ok else "degraded",
+        "documents_loaded": state.vector_store is not None,
+        "ollama_reachable": ollama_ok,
+        "ollama_base_url": config.OLLAMA_BASE_URL,
+    }
+
+
+@app.post("/upload", tags=["documents"])
+async def upload_document(file: UploadFile = File(...)):  # noqa: B008 - standard FastAPI
+    """Upload a PDF or TXT file, chunk it, and index it in the vector store."""
+    global_state = state
+    logger.info("Upload request: %s (%s)", file.filename, file.content_type)
+
+    file_extension = Path(file.filename or "").suffix.lower()
+    if file_extension not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file_extension}. "
+            f"Supported: {sorted(SUPPORTED_EXTENSIONS)}",
+        )
+
+    file_path = os.path.join(UPLOAD_DIR, Path(file.filename).name)
+    content = await file.read()
+    # Small write; kept inline rather than pushed to a threadpool.
+    with open(file_path, "wb") as buffer:  # noqa: ASYNC230
+        buffer.write(content)
+    logger.info("Saved upload to %s", file_path)
+
     try:
-        print(f"\n{'='*60}")
-        print(f"FILE UPLOAD REQUEST")
-        print(f"{'='*60}")
-        print(f"Filename: {file.filename}")
-        print(f"Content Type: {file.content_type}")
-        
-        # Validate file type
-        file_extension = Path(file.filename).suffix.lower()
-        if file_extension not in ['.pdf', '.txt']:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Unsupported file type: {file_extension}. Only .pdf and .txt are supported."
-            )
-        
-        # Save uploaded file
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
-        print(f"Saving to: {file_path}")
-        
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        print(f"✓ File saved")
-        
-        # Process document
-        print("Processing document...")
+        ingestion = global_state.ensure_ingestion()
         chunks = ingestion.process_documents(file_path)
-        
-        if not chunks:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to extract content from document"
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Document processing failed")
+        raise HTTPException(status_code=500, detail="Failed to process document")
+
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No content extracted from document")
+
+    try:
+        if global_state.vector_store is None:
+            logger.info("Creating new vector store")
+            global_state.vector_store = ingestion.create_vector_store(
+                chunks, config.VECTOR_STORE_NAME
             )
-        
-        # Create or update vector store
-        try:
-            if vector_store is None:
-                print("Creating new vector store...")
-                vector_store = ingestion.create_vector_store(chunks, VECTOR_STORE_NAME)
-            else:
-                print("Updating existing vector store...")
-                ingestion.add_documents_to_existing_store(chunks, VECTOR_STORE_NAME)
-                vector_store = ingestion.load_vector_store(VECTOR_STORE_NAME)
-        except Exception as e:
-            print(f"Vector store error: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to create/update vector store: {str(e)}"
+        else:
+            logger.info("Appending to existing vector store")
+            ingestion.add_documents_to_existing_store(chunks, config.VECTOR_STORE_NAME)
+            global_state.vector_store = ingestion.load_vector_store(
+                config.VECTOR_STORE_NAME
             )
-        
-        # Initialize RAG and Quiz systems
-        print("Initializing RAG and Quiz systems...")
-        rag_system = RAGSystem(vector_store)
-        quiz_generator = QuizGenerator(vector_store)
-        
-        print(f"✓ Upload complete!")
-        print(f"{'='*60}\n")
-        
-        return {
-            "message": "Document uploaded and processed successfully",
-            "filename": file.filename,
-            "chunks_created": len(chunks),
-            "status": "success"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"✗ Upload failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    except Exception:
+        logger.exception("Vector store error")
+        raise HTTPException(status_code=500, detail="Failed to index document")
+
+    global_state.rag_system = RAGSystem(global_state.vector_store)
+    global_state.quiz_generator = QuizGenerator(global_state.vector_store)
+    logger.info("Upload complete: %d chunks", len(chunks))
+
+    return {
+        "message": "Document uploaded and processed successfully",
+        "filename": Path(file.filename).name,
+        "chunks_created": len(chunks),
+        "status": "success",
+    }
 
 
-@app.post("/ask")
+@app.post("/ask", tags=["qa"])
 def ask_question(request: QuestionRequest):
-    """Ask a question using RAG"""
-    if rag_system is None:
-        raise HTTPException(
-            status_code=400, 
-            detail="No documents uploaded yet. Please upload documents first."
-        )
-    
+    """Answer a question from the uploaded study materials."""
+    state.require_ready()
     try:
-        print(f"\n[Q&A REQUEST] {request.question}")
-        result = rag_system.ask_question(request.question, k=request.k)
-        print(f"[Q&A RESPONSE] Generated answer with {len(result['sources'])} sources")
+        result = state.rag_system.ask_question(request.question, k=request.k)
+        logger.info("Answered question with %d sources", len(result["sources"]))
         return result
-    except Exception as e:
-        print(f"✗ Q&A failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Question answering failed: {str(e)}")
+    except Exception:
+        logger.exception("Q&A failed")
+        raise HTTPException(status_code=500, detail="Question answering failed")
 
 
-@app.post("/summarize")
+@app.post("/summarize", tags=["qa"])
 def summarize(request: SummarizeRequest):
-    """Summarize content from uploaded documents"""
-    if rag_system is None:
-        raise HTTPException(
-            status_code=400, 
-            detail="No documents uploaded yet. Please upload documents first."
-        )
-    
+    """Summarize the uploaded study materials."""
+    state.require_ready()
     try:
-        print(f"\n[SUMMARY REQUEST] Type: {request.summary_type}, Topic: {request.topic}")
-        result = rag_system.summarize(
+        result = state.rag_system.summarize(
             query=request.topic,
-            summary_type=request.summary_type,
-            k=request.k
+            summary_type=request.summary_type.value,
+            k=request.k,
         )
-        print(f"[SUMMARY RESPONSE] Generated from {len(result['sources'])} sources")
+        logger.info("Summary generated from %d sources", len(result["sources"]))
         return result
-    except Exception as e:
-        print(f"✗ Summarization failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
+    except Exception:
+        logger.exception("Summarization failed")
+        raise HTTPException(status_code=500, detail="Summarization failed")
 
 
-@app.post("/definitions")
-def get_definitions(topic: str = "definitions terms concepts"):
-    """Extract key definitions and terms from uploaded materials"""
-    if rag_system is None:
-        raise HTTPException(
-            status_code=400, 
-            detail="No documents uploaded yet. Please upload documents first."
-        )
-    
+@app.post("/definitions", tags=["qa"])
+def get_definitions(request: DefinitionsRequest):
+    """Extract key terms and definitions from the uploaded materials."""
+    state.require_ready()
     try:
-        print(f"\n[DEFINITIONS REQUEST] Topic: {topic}")
-        result = rag_system.extract_definitions(query=topic)
-        print(f"[DEFINITIONS RESPONSE] Extracted from {len(result['sources'])} sources")
+        result = state.rag_system.extract_definitions(query=request.topic, k=request.k)
+        logger.info("Definitions extracted from %d sources", len(result["sources"]))
         return result
-    except Exception as e:
-        print(f"✗ Definition extraction failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Definition extraction failed: {str(e)}")
+    except Exception:
+        logger.exception("Definition extraction failed")
+        raise HTTPException(status_code=500, detail="Definition extraction failed")
 
 
-@app.post("/quiz/generate")
+@app.post("/quiz/generate", tags=["quiz"])
 def generate_quiz(request: QuizRequest):
-    """Generate a quiz from uploaded materials"""
-    if quiz_generator is None:
-        raise HTTPException(
-            status_code=400, 
-            detail="No documents uploaded yet. Please upload documents first."
-        )
-    
+    """Generate a multiple-choice quiz from the uploaded materials."""
+    state.require_ready()
     try:
-        print(f"\n[QUIZ REQUEST] Topic: {request.topic}, Questions: {request.num_questions}, Difficulty: {request.difficulty}")
-        
-        quiz = quiz_generator.generate_quiz(
+        quiz = state.quiz_generator.generate_quiz(
             topic=request.topic,
             num_questions=request.num_questions,
-            difficulty=request.difficulty
+            difficulty=request.difficulty.value,
         )
-        
         if "error" in quiz:
             raise HTTPException(status_code=500, detail=quiz["error"])
-        
-        print(f"[QUIZ RESPONSE] Generated {len(quiz.get('questions', []))} questions")
+        logger.info("Generated %d quiz questions", len(quiz.get("questions", [])))
         return quiz
-        
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"✗ Quiz generation failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Quiz generation failed: {str(e)}")
+    except Exception:
+        logger.exception("Quiz generation failed")
+        raise HTTPException(status_code=500, detail="Quiz generation failed")
 
 
-@app.post("/quiz/grade")
+@app.post("/quiz/grade", tags=["quiz"])
 def grade_quiz(request: GradeQuizRequest):
-    """Grade a quiz submission"""
-    if quiz_generator is None:
-        raise HTTPException(
-            status_code=400, 
-            detail="No documents uploaded yet. Please upload documents first."
-        )
-    
+    """Grade a submitted quiz."""
+    state.require_ready()
     try:
-        print(f"\n[QUIZ GRADING] Grading {len(request.questions)} questions")
-        results = quiz_generator.grade_quiz(request.questions, request.user_answers)
-        print(f"[QUIZ GRADING] Score: {results['score']}%")
+        # Normalize answer keys to int for the grader
+        user_answers = {int(k): v for k, v in request.user_answers.items()}
+        results = state.quiz_generator.grade_quiz(request.questions, user_answers)
+        logger.info("Quiz graded: %s%%", results["score"])
         return results
-    except Exception as e:
-        print(f"✗ Quiz grading failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Quiz grading failed: {str(e)}")
+    except Exception:
+        logger.exception("Quiz grading failed")
+        raise HTTPException(status_code=500, detail="Quiz grading failed")
 
 
-@app.get("/documents")
+@app.get("/documents", tags=["documents"])
 def list_documents():
-    """List all uploaded documents"""
+    """List uploaded documents."""
     try:
-        files = [f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))]
-        return {
-            "documents": files,
-            "count": len(files)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+        files = [
+            f
+            for f in os.listdir(UPLOAD_DIR)
+            if os.path.isfile(os.path.join(UPLOAD_DIR, f))
+        ]
+        return {"documents": files, "count": len(files)}
+    except Exception:
+        logger.exception("Failed to list documents")
+        raise HTTPException(status_code=500, detail="Failed to list documents")
 
 
-@app.delete("/reset")
+@app.delete("/reset", tags=["documents"])
 def reset_system():
-    """Reset the system (clear all data)"""
-    global vector_store, rag_system, quiz_generator
-    
+    """Delete all uploaded documents and the vector store."""
     try:
-        # Clear uploads
         for file in os.listdir(UPLOAD_DIR):
             file_path = os.path.join(UPLOAD_DIR, file)
             if os.path.isfile(file_path):
                 os.remove(file_path)
-        
-        # Clear vector store
-        vector_store_path = os.path.join(parent_dir, "data", "vector_store", VECTOR_STORE_NAME)
+
+        vector_store_path = os.path.join(
+            parent_dir, config.VECTOR_STORE_DIR, config.VECTOR_STORE_NAME
+        )
         if os.path.exists(vector_store_path):
             shutil.rmtree(vector_store_path)
-        
-        # Reset globals
-        vector_store = None
-        rag_system = None
-        quiz_generator = None
-        
-        return {
-            "message": "System reset successfully",
-            "status": "success"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Reset failed: {str(e)}")
+
+        state.vector_store = None
+        state.rag_system = None
+        state.quiz_generator = None
+        logger.info("System reset")
+        return {"message": "System reset successfully", "status": "success"}
+    except Exception:
+        logger.exception("Reset failed")
+        raise HTTPException(status_code=500, detail="Reset failed")
 
 
-# Run the API
 if __name__ == "__main__":
     import uvicorn
-    
-    print("\n" + "="*60)
-    print("AI STUDY ASSISTANT API")
-    print("="*60)
-    print("Powered by: Ollama")
-    print("Starting server on: http://localhost:8000")
-    print("API Docs: http://localhost:8000/docs")
-    print("="*60 + "\n")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+
+    logger.info("Starting AI Study Assistant API on %s:%d", config.API_HOST, config.API_PORT)
+    logger.info("API docs: http://localhost:%d/docs", config.API_PORT)
+    uvicorn.run(app, host=config.API_HOST, port=config.API_PORT, log_level="info")

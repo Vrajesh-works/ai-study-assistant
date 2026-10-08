@@ -1,184 +1,170 @@
+"""Quiz generation and grading backed by Ollama."""
+
 import json
+import logging
 import re
-from typing import List, Dict
+
 from langchain_community.llms import Ollama
 from langchain_community.vectorstores import Chroma
+
+from src import config
 from src.prompts import QUIZ_GENERATION_PROMPT
+
+logger = logging.getLogger(__name__)
+
+VALID_DIFFICULTIES = {"easy", "medium", "hard"}
 
 
 class QuizGenerator:
-    """Generate quizzes from study materials using Ollama"""
-    
-    def __init__(self, vector_store: Chroma, model_name: str = "llama3.2"):
+    """Generate multiple-choice quizzes from study materials."""
+
+    def __init__(
+        self,
+        vector_store: Chroma,
+        model_name: str = config.OLLAMA_MODEL,
+        base_url: str = config.OLLAMA_BASE_URL,
+    ):
         self.vector_store = vector_store
-        
-        print(f"Initializing Quiz Generator with {model_name}")
-        
+
+        logger.info("Initializing quiz generator with %s", model_name)
         self.llm = Ollama(
             model=model_name,
-            temperature=0.7,  # Slightly higher for creative question generation
-            base_url="http://localhost:11434",
-            num_predict=2048,  # Allow longer responses for multiple questions
+            temperature=0.7,
+            base_url=base_url,
+            num_predict=2048,
         )
-        
-        print("✓ Quiz Generator ready")
-    
+        logger.info("Quiz generator ready")
+
     def generate_quiz(
-        self, 
-        topic: str, 
-        num_questions: int = 10, 
+        self,
+        topic: str,
+        num_questions: int = 10,
         difficulty: str = "medium",
-        k: int = 15
-    ) -> Dict:
-        """
-        Generate a quiz on a specific topic
-        
-        Args:
-            topic: Topic or query for quiz generation
-            num_questions: Number of questions (1-10 recommended)
-            difficulty: "easy", "medium", or "hard"
-            k: Number of document chunks to retrieve
-        """
-        print(f"\n{'='*50}")
-        print(f"Quiz Generation")
-        print(f"{'='*50}")
-        print(f"Topic: {topic}")
-        print(f"Questions: {num_questions}")
-        print(f"Difficulty: {difficulty}")
-        
-        # Retrieve relevant content
-        print("Searching for relevant content...")
+        k: int = 15,
+    ) -> dict:
+        """Generate a multiple-choice quiz on a topic."""
+        difficulty = difficulty.lower()
+        if difficulty not in VALID_DIFFICULTIES:
+            raise ValueError(
+                f"Invalid difficulty '{difficulty}'. "
+                f"Choose from: {sorted(VALID_DIFFICULTIES)}"
+            )
+        num_questions = max(1, min(10, num_questions))
+
+        logger.info(
+            "Generating quiz: topic=%s questions=%d difficulty=%s",
+            topic,
+            num_questions,
+            difficulty,
+        )
         relevant_docs = self.vector_store.similarity_search(topic, k=k)
-        
+
         if not relevant_docs:
             return {
                 "error": "No relevant content found for quiz generation",
-                "questions": []
+                "questions": [],
             }
-        
-        print(f"✓ Found {len(relevant_docs)} relevant chunks")
-        
-        # Prepare context (limit to avoid token limits)
-        context = "\n\n".join([doc.page_content for doc in relevant_docs[:8]])
-        context = context[:3000]  # Limit context size
-        
-        # Create prompt
+        logger.info("Found %d relevant chunks", len(relevant_docs))
+
+        context = "\n\n".join(doc.page_content for doc in relevant_docs[:8])
         prompt = QUIZ_GENERATION_PROMPT.format(
             num_questions=num_questions,
-            context=context,
-            difficulty=difficulty
+            context=context[:3000],
+            difficulty=difficulty,
         )
-        
-        # Generate quiz
-        print("Generating quiz questions...")
+
         try:
             quiz_text = self.llm.invoke(prompt)
-            
-            print("✓ Response received")
-            print("Parsing JSON...")
-            
-            # Clean up response - extract JSON
-            quiz_text = self._extract_json(quiz_text)
-            
-            # Parse JSON
-            quiz_data = json.loads(quiz_text)
-            
-            # Validate structure
-            if "questions" not in quiz_data or not isinstance(quiz_data["questions"], list):
+            quiz_data = json.loads(self._extract_json(quiz_text))
+
+            if "questions" not in quiz_data or not isinstance(
+                quiz_data["questions"], list
+            ):
                 raise ValueError("Invalid quiz structure")
-            
-            # Add metadata
+
             quiz_data["metadata"] = {
                 "topic": topic,
                 "difficulty": difficulty,
                 "num_questions": len(quiz_data.get("questions", [])),
-                "sources": list(set([doc.metadata.get('source', 'unknown') for doc in relevant_docs[:5]]))
+                "sources": list(
+                    {
+                        doc.metadata.get("source", "unknown")
+                        for doc in relevant_docs[:5]
+                    }
+                ),
             }
-            
-            print(f"✓ Successfully generated {len(quiz_data['questions'])} questions")
+            logger.info(
+                "Generated %d questions", len(quiz_data["questions"])
+            )
             return quiz_data
-            
+
         except json.JSONDecodeError as e:
-            print(f"✗ JSON parsing failed: {str(e)}")
+            logger.warning("Quiz JSON parsing failed: %s", e)
             return {
-                "error": f"Failed to parse quiz JSON: {str(e)}",
-                "raw_response": quiz_text if 'quiz_text' in locals() else "No response",
-                "questions": []
+                "error": f"Failed to parse quiz JSON: {e}",
+                "questions": [],
             }
-        except Exception as e:
-            print(f"✗ Quiz generation failed: {str(e)}")
-            return {
-                "error": f"Quiz generation failed: {str(e)}",
-                "questions": []
-            }
-    
-    def _extract_json(self, text: str) -> str:
-        """Extract JSON from model response"""
-        # Remove markdown code blocks
+        except Exception:
+            logger.exception("Quiz generation failed")
+            return {"error": "Quiz generation failed", "questions": []}
+
+    @staticmethod
+    def _extract_json(text: str) -> str:
+        """Extract a JSON object from a model response."""
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
         elif "```" in text:
-            # Try to extract any code block
-            parts = text.split("```")
-            for part in parts:
+            for part in text.split("```"):
                 if "{" in part and "}" in part:
                     text = part
                     break
-        
-        # Find JSON object
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+
+        match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             text = match.group(0)
-        
         return text.strip()
-    
-    def grade_quiz(self, questions: List[Dict], user_answers: Dict[int, str]) -> Dict:
-        """
-        Grade a quiz submission
-        
-        Args:
-            questions: List of question dictionaries
-            user_answers: Dict mapping question index to answer (A/B/C/D)
-        """
-        print(f"\n{'='*50}")
-        print("Grading Quiz")
-        print(f"{'='*50}")
-        
+
+    @staticmethod
+    def grade_quiz(questions: list[dict], user_answers: dict) -> dict:
+        """Grade a quiz submission. Pure logic, no LLM call."""
+        logger.info("Grading quiz with %d questions", len(questions))
         results = []
         correct_count = 0
-        
+
         for idx, question in enumerate(questions):
-            user_answer = user_answers.get(idx, "").upper()
-            correct_answer = question.get("correct_answer", "").upper()
-            is_correct = user_answer == correct_answer
-            
+            raw_answer = user_answers.get(idx, user_answers.get(str(idx), ""))
+            user_answer = str(raw_answer).upper()
+            correct_answer = str(question.get("correct_answer", "")).upper()
+            is_correct = bool(user_answer) and user_answer == correct_answer
+
             if is_correct:
                 correct_count += 1
-            
-            results.append({
-                "question_number": idx + 1,
-                "question": question.get("question"),
-                "user_answer": user_answer if user_answer else "Not answered",
-                "correct_answer": correct_answer,
-                "is_correct": is_correct,
-                "explanation": question.get("explanation", "")
-            })
-        
+
+            results.append(
+                {
+                    "question_number": idx + 1,
+                    "question": question.get("question"),
+                    "user_answer": user_answer if user_answer else "Not answered",
+                    "correct_answer": correct_answer,
+                    "is_correct": is_correct,
+                    "explanation": question.get("explanation", ""),
+                }
+            )
+
         score = (correct_count / len(questions)) * 100 if questions else 0
-        
-        print(f"✓ Score: {score:.1f}% ({correct_count}/{len(questions)})")
-        
+        logger.info("Quiz score: %.1f%% (%d/%d)", score, correct_count, len(questions))
+
         return {
             "score": round(score, 1),
             "correct": correct_count,
             "total": len(questions),
             "percentage": f"{score:.1f}%",
-            "results": results
+            "results": results,
         }
 
 
-# Test the module
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     print("Quiz Generator Module - Ready!")
     print("\nTo test:")
     print("1. Load a vector store")
